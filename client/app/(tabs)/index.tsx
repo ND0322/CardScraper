@@ -13,6 +13,7 @@ import { useState, useCallback, useEffect } from "react";
 import { useFocusEffect } from "@react-navigation/native";
 import { Ionicons } from "@expo/vector-icons";
 import httpClient from "../httpClient";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 
 export default function Index() {
   const [isLogin, setIsLogin] = useState(false);
@@ -24,8 +25,12 @@ export default function Index() {
   const [user, setUser] = useState("");
 
   const logoutUser = async () => {
-    await httpClient.post("http://127.0.0.1:5000/logout");
-    window.location.href = "/";
+    try {
+      await AsyncStorage.removeItem("token");
+      setUser("none");
+    } catch (error) {
+      console.error("Failed to logout:", error);
+    }
   };
 
   const validateEmail = (email: string) => {
@@ -44,8 +49,14 @@ export default function Index() {
         email,
         password,
       });
-      Alert.alert("Success", "Account created");
+      // Store token for authenticated requests
+      await AsyncStorage.setItem("token", resp.data.access_token);
+      Alert.alert("Success", "Account created and logged in");
+      setUser(resp.data);
       setIsSignup(false);
+      setEmail("");
+      setPassword("");
+      setShowPassword(false);
     } catch (e: any) {
       if (e.message.includes("409")) {
         Alert.alert("Error", "This user already exists");
@@ -61,6 +72,13 @@ export default function Index() {
         email,
         password,
       });
+      await AsyncStorage.setItem("token", resp.data.access_token);
+      setUser(resp.data);
+      setIsLogin(false);
+      setEmail("");
+      setPassword("");
+      setShowPassword(false);
+
       Alert.alert("Success", "Logged In");
     } catch (e: any) {
       //console.log(e.message);
@@ -88,13 +106,13 @@ export default function Index() {
           const resp = await httpClient.get("http://127.0.0.1:5000/@me");
           setUser(resp.data);
         } catch (error: any) {
-          console.log("Not authenticated");
-          console.log(error.message);
+          console.log("Not authenticated:", error.message);
           setUser("none");
         }
       };
 
       checkUser();
+
       return () => {
         backButton();
       };
@@ -103,8 +121,16 @@ export default function Index() {
 
   if (user != "none") {
     return (
-      <View>
+      <View style={styles.container}>
         <Text>{user.email}</Text>
+
+        <TouchableHighlight
+          onPress={() => logoutUser()}
+          underlayColor="#3f3f3f"
+          style={styles.button}
+        >
+          <Text style={styles.buttonText}>Logout</Text>
+        </TouchableHighlight>
       </View>
     );
   }

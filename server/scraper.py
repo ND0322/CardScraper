@@ -1,13 +1,28 @@
-import json
 import math
 import httpx
 import asyncio
+from urllib.parse import urlencode
+from parsel import Selector
+import json
 import locale
 
 
 from typing import Dict, List, Literal
 from urllib.parse import urlencode
 from parsel import Selector
+
+import re
+
+def clean_price(value):
+    if not value:
+        return None
+    try:
+        # Extract digits and decimal (e.g., "C $336.61" -> "336.61")
+        cleaned = re.sub(r"[^\d.]", "", value)
+        return float(cleaned)
+    except ValueError:
+        return None  # or handle/log the error
+
 
 def convert(string, thousands_delim = ',', abbr = 'de_DE.UTF-8'):
 
@@ -19,22 +34,25 @@ def convert(string, thousands_delim = ',', abbr = 'de_DE.UTF-8'):
 
     return number
 
+def extract_numeric(value):
+    """Helper to extract float from price or shipping string."""
+    if not value:
+        return 0.0
+    # Remove all non-numeric except dot and comma
+    cleaned = re.sub(r"[^\d.,]", "", value)
+    # Remove commas to parse float safely
+    cleaned = cleaned.replace(",", "")
+    try:
+        return float(cleaned)
+    except ValueError:
+        return 0.0
+
 SORTING_MAP = {
     "best_match": 12,
     "ending_soonest": 1,
     "newly_listed": 10,
 }
 
-session = httpx.AsyncClient(
-    headers={
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36 Edg/113.0.1774.35",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br",
-    },
-    http2=True,
-    follow_redirects=True
-)
 
 
 def parse_search(response: httpx.Response) -> List[Dict]:
@@ -55,7 +73,6 @@ def parse_search(response: httpx.Response) -> List[Dict]:
         shipping_selector = box.css(".s-item__shipping")
         shipping = shipping_selector.css(".ITALIC::text").get() or price_selector.css("::text").get("").strip()
 
-
         previews.append(
             {
                 "url": css("a.s-item__link::attr(href)").split("?")[0],
@@ -71,9 +88,32 @@ def parse_search(response: httpx.Response) -> List[Dict]:
             }
         )
     return previews
+async def item_generator(session, query, max_pages=5, items_per_page=60, sort="newly_listed"):
+    def make_request(page):
+        return "https://www.ebay.ca/sch/i.html?" + urlencode({
+            "_nkw": query,
+            "_ipg": items_per_page,
+            "_sop": SORTING_MAP[sort],
+            "_pgn": page,
+            "LH_ItemCondition": 3,
+            "LH_BIN": 1,
+        })
 
+    for page in range(1, max_pages + 1):
+        try:
+            response = await session.get(make_request(page), timeout=20)
+            response.raise_for_status()
+        except Exception as e:
+            print(f"Failed to fetch page {page}: {e}")
+            continue
+
+        # FIXED LINE:
+        items = parse_search(response)  # <-- response is passed directly, not response.text
+        for item in items:
+            yield item
 
 async def scrape_search(
+    session,
     query,
     max_pages=1,
     category=0,
@@ -82,6 +122,7 @@ async def scrape_search(
 ) -> List[Dict]:
     """Scrape Ebay's search results page for product preview data for given"""
 
+    max_pages = 1
     def make_request(page):
         return "https://www.ebay.ca/sch/i.html?" + urlencode(
             {
@@ -96,41 +137,33 @@ async def scrape_search(
             }
         )
 
-    first_page = await session.get(make_request(page=1))
+    first_page = await session.get(make_request(page=1), timeout = 20)
     results = parse_search(first_page)
     if max_pages == 1:
-        return results
-    # find total amount of results for concurrent pagination
-    total_results = first_page.selector.css(".srp-controls__count-heading>span::text").get()
-    total_results = int(total_results.replace(",", ""))
-    total_pages = math.ceil(total_results / items_per_page)
-    if total_pages > max_pages:
-        total_pages = max_pages
-    other_pages = [session.get(make_request(page=i)) for i in range(2, total_pages + 1)]
-    for response in asyncio.as_completed(other_pages):
-        response = await response
-        try:
-            results.extend(parse_search(response))
-        except Exception as e:
-            print(f"failed to scrape search page {response.url}")
-    return results
+        pass
+    else:
+        # find total amount of results for concurrent pagination
+        total_results = first_page.selector.css(".srp-controls__count-heading>span::text").get()
+        total_results = int(total_results.replace(",", ""))
+        total_pages = math.ceil(total_results / items_per_page)
+        if total_pages > max_pages:
+            total_pages = max_pages
+        other_pages = [session.get(make_request(page=i)) for i in range(2, total_pages + 1)]
+        for response in asyncio.as_completed(other_pages):
+            response = await response
+            try:
+                results.extend(parse_search(response))
+            except Exception as e:
+                print(f"failed to scrape search page {response.url}")
 
+    for i in results:
+        balls = {}
+        balls["Total"] = str(convert(i["price"][3:]) + convert(i['shipping'].split(" ")[1][1:]))
+        balls["Price"] = convert(i["price"][3:])
+        balls["Shipping"] = convert(i['shipping'].split(" ")[1][1:])
+        balls["Title"] = i["title"]
+        balls["Photo"] = i["photo"]
+        balls["Url"] = i['url']
 
-data = asyncio.run(scrape_search("pokemon booster box"))
-
-
-listings = []
-
-for i in data:
-    listings.append(i)
-    listings[-1]["Total Price"] = convert(listings[-1]["price"][3:]) + convert(listings[-1]['shipping'].split(" ")[1][1:])
-
-
-
-names = []
-
-for i in listings:
-    
-    names.append([i['title'], i['Total Price']])
-
-print(names)
+        yield balls
+        
