@@ -21,7 +21,6 @@ from sqlalchemy.exc import IntegrityError
 import gc
 import time
 from celery.utils.debug import sample_mem, memdump
-from sqlalchemy.orm import sessionmaker
 
 #celery -A app.celery_app worker --loglevel INFO
 #celery -A app.celery_app worker --loglevel INFO --max-tasks-per-child=1
@@ -56,7 +55,7 @@ def create_app():
             beat_schedule={
                 "task-every-10-seconds": {
                     "task": "app.run_crawler_task",
-                    "schedule": 300,
+                    "schedule": 100,
                 }
             },
         ),
@@ -90,80 +89,60 @@ def fuck():
     run_crawler_task()
     return "fuck you"
 
-@shared_task(bind=True, ignore_result=True)
-def run_crawler_task(self, query="pokemon booster box", max_pages=1):
-    """Beat-compatible version with memory safeguards"""
-    # Create fresh event loop for each run
+@shared_task(bind=True, ignore_result=False)
+def run_crawler_task(query="pokemon booster box", max_pages=1):
+    """Celery task that runs the asynchronous crawler safely."""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    
     try:
-        # Run with memory monitoring
-        result = loop.run_until_complete(
-            _run_crawler_with_limits(query, max_pages)
-        )
-        return result
-    except MemoryError:
-        print("Memory limit reached - terminating task early")
-        raise self.retry(exc=MemoryError(), countdown=60)
+        loop.run_until_complete(_run_crawler(query, max_pages))
     finally:
-        # Clean up aggressively
         loop.close()
+
+
+
+async def _run_crawler(query, max_pages):
+    """Main async function to crawl and insert posts."""
+
+    BATCH_SIZE = 5
+    queue = []
+
+    async with httpx.AsyncClient(
+        headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36 Edg/113.0.1774.35",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
+        },
+        http2=True,
+        follow_redirects=True,
+        timeout = 30,
+    ) as session:
+        async for item in scrape_search(query=query, max_pages=max_pages, session=session):
+            await asyncio.sleep(0.5)
+            post = Post(
+                content=item.get("Title"),
+                url=item.get("Url"),
+                price=item.get("Price"),
+                shipping=item.get("Shipping"),
+                total=item.get("Total"),
+                photo=item.get("Photo"),
+            )
+            queue.append(post)
+
+            if len(queue) >= BATCH_SIZE:
+                # Move the insert to a separate thread to avoid blocking the event loop
+                await asyncio.to_thread(_insert_batch, queue)
+                queue.clear()
+                gc.collect()
+
+    if queue:
+        await asyncio.to_thread(_insert_batch, queue)
+        queue.clear()
         gc.collect()
 
-async def _process_single_item(item):
-    try:
-        # Validate and convert prices
-        price = float(item.get("Price", 0))
-        shipping = float(item.get("Shipping", 0))
-        total = float(item.get("Total", 0))
-        
-        #if price > 1000:  # Sanity check
-            #print(f"Skipping high price: {price}")
-            #return
-            
-        # Check for existing post
-        exists = db.session.query(Post.id).filter_by(url=item["Url"]).first()
-        if exists:
-            return
-            
-        # Insert new post
-        post = Post(
-            content=item["Title"],
-            url=item["Url"],
-            price=price,
-            shipping=shipping,
-            total=total,
-            photo=item["Photo"],
-        )
-        db.session.add(post)
-        db.session.commit()
-    finally:
-        db.session.close()
-        gc.collect()
-        
-async def _run_crawler_with_limits(query, max_pages):
-    """Wrapper with memory checks"""
-    process = psutil.Process()
-    mem_limit = 150 * 1024 * 1024  # 150MB
-    
-    async with httpx.AsyncClient() as session:
-        item_count = 0
-        async for item in scrape_search(query=query, max_pages=max_pages, session=session):
-            if process.memory_info().rss > mem_limit:
-                print(f"Memory threshold reached at {item_count} items")
-                break
-                
-            await asyncio.sleep(0.5)  # Rate limiting
-            
-            try:
-                await _process_single_item(item)
-                item_count += 1
-            except Exception as e:
-                print(f"Error processing item: {e}")
-            
-            if item_count % 5 == 0:
-                gc.collect()
+    db.session.remove()
+
 
 
 def _insert_batch(posts):
