@@ -28,7 +28,8 @@ redis-cli
 run app.py in the server folder
 
 Once again open a new terminal and type
-cd client
+cd client 
+
 npx expo
 
 wait for the following:
