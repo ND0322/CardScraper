@@ -2,9 +2,15 @@ import { View, Text } from "react-native";
 import React, { useState } from "react";
 import httpClient from "../httpClient";
 import { Button } from "@react-navigation/elements";
+import Post from "../components/post";
+import PostInfo from "../components/reels/PostInfo";
+import SingleReel from "../components/reels/SingleReel";
+import ReelsComponent from "../components/reels/ReelsComponent";
+import SavedCard from "../components/saved/SavedCard";
 
 export default function Feed() {
   const [cnt, setCnt] = useState(0);
+  
 
   const getCnt = async() => {
     try {
@@ -30,8 +36,14 @@ export default function Feed() {
 
   return (
     <View >
-      <Text style = {{"alignContent" : "center", "justifyContent" : "center"}}>{cnt}</Text>
-      <Button onPress = {fuck}>Fuck</Button>
+      <ReelsComponent></ReelsComponent>
+
+
+
+
+      
     </View>
   );
 }
+
+

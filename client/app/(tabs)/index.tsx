@@ -260,7 +260,7 @@ const isMobile = width < 500;
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: "pink",
+    backgroundColor: 'pink',
     alignItems: "center",
     justifyContent: "center",
     padding: isMobile ? 20 : 40,

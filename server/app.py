@@ -1,4 +1,4 @@
-import os, psutil
+import os
 from flask import Flask, request, jsonify, session, send_from_directory
 from flask_cors import CORS
 from flask_session import Session
@@ -16,7 +16,7 @@ import httpx
 from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity
 from celery import Celery, Task, shared_task
 from celery.schedules import crontab
-from scraper import item_generator, scrape_search
+from scraper import item_generator, scrape_search, randomItem
 from sqlalchemy.exc import IntegrityError
 import gc
 import time
@@ -82,7 +82,65 @@ with app.app_context():
 
 server_session = Session(app)
 
+@app.route('/getData', methods = ['GET'])
+def query():
+    id = request.args.get("id")
 
+    id = int(id) + 1
+
+
+    post = Post.query.filter_by(id = id).first()
+
+    if(post is None):
+        return jsonify({"error" : "No site with this id"}), 401
+    
+
+    print("BALLS", id, post.content)
+    
+
+    return jsonify({
+        "title" : post.content,
+        "url" : post.url,
+        "price" : post.price,
+        "shipping" : post.shipping,
+        "total" : post.total,
+        "photo" : post.photo
+    })
+
+
+
+@app.route('/getSavedData', methods = ['GET'])
+@jwt_required()
+def getSavedData():
+    id = request.args.get("id")
+    user_id = get_jwt_identity()
+
+    id = int(id)+1
+
+    post = SavedPost.query.filter_by(user_id=user_id, index=id).first()
+
+    try:
+        print("GET:",  post.postId, user_id, id)
+    except:
+        print("BUT:", id)
+
+    if(post is None):
+        return jsonify({"error" : "No site with this id"}), 401
+    
+    post = Post.query.filter_by(id = post.postId+1).first()
+    
+
+    print("BALLS", id, post.content)
+    
+
+    return jsonify({
+        "title" : post.content,
+        "url" : post.url,
+        "price" : post.price,
+        "shipping" : post.shipping,
+        "total" : post.total,
+        "photo" : post.photo
+    })
 
 @app.route("/fuck", methods = ['POST'])
 def fuck():
@@ -95,7 +153,7 @@ def run_crawler_task(query="pokemon booster box", max_pages=1):
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
-        loop.run_until_complete(_run_crawler(query, max_pages))
+        loop.run_until_complete(_run_crawler("pokemon booster box", 1000))
     finally:
         loop.close()
 
@@ -104,37 +162,27 @@ def run_crawler_task(query="pokemon booster box", max_pages=1):
 async def _run_crawler(query, max_pages):
     """Main async function to crawl and insert posts."""
 
-    BATCH_SIZE = 5
+    BATCH_SIZE = 60
     queue = []
 
-    async with httpx.AsyncClient(
-        headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36 Edg/113.0.1774.35",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Accept-Encoding": "gzip, deflate, br",
-        },
-        http2=True,
-        follow_redirects=True,
-        timeout = 30,
-    ) as session:
-        async for item in scrape_search(query=query, max_pages=max_pages, session=session):
-            await asyncio.sleep(0.5)
-            post = Post(
-                content=item.get("Title"),
-                url=item.get("Url"),
-                price=item.get("Price"),
-                shipping=item.get("Shipping"),
-                total=item.get("Total"),
-                photo=item.get("Photo"),
-            )
-            queue.append(post)
+   
+    print("BALLS", query)
+    async for item in scrape_search(query=query, max_pages=max_pages):
+        post = Post(
+            content=item.get("Title"),
+            url=item.get("Url"),
+            price=item.get("Price"),
+            shipping=item.get("Shipping"),
+            total=item.get("Total"),
+            photo=item.get("Photo"),
+        )
+        queue.append(post)
 
-            if len(queue) >= BATCH_SIZE:
-                # Move the insert to a separate thread to avoid blocking the event loop
-                await asyncio.to_thread(_insert_batch, queue)
-                queue.clear()
-                gc.collect()
+        if len(queue) >= BATCH_SIZE:
+            # Move the insert to a separate thread to avoid blocking the event loop
+            await asyncio.to_thread(_insert_batch, queue)
+            queue.clear()
+            gc.collect()
 
     if queue:
         await asyncio.to_thread(_insert_batch, queue)
@@ -142,6 +190,47 @@ async def _run_crawler(query, max_pages):
         gc.collect()
 
     db.session.remove()
+
+@app.route("/getSaved", methods = ["GET"])
+@jwt_required()
+def getSaved():
+    id = request.args.get("id")
+    user_id = get_jwt_identity()
+
+    print("BALLSE", user_id)
+
+    return jsonify({"msg" : (SavedPost.query.filter_by(user_id=user_id, post_id=id).first() is not None)}), 200
+
+
+
+@app.route("/getRandom", methods = ["POST"])
+def getRandom():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(runRandom())
+    finally:
+        loop.close()
+    
+    return "fuck off"
+
+async def runRandom():
+    q = []
+    
+    async for item in randomItem("pokemon booster box"):
+        post = Post(
+            content=item.get("Title"),
+            url=item.get("Url"),
+            price=item.get("Price"),
+            shipping=item.get("Shipping"),
+            total=item.get("Total"),
+            photo=item.get("Photo"),
+        )
+        q.append(post)
+    
+    
+    _insert_batch(q)
+
 
 
 
@@ -191,20 +280,34 @@ def assign_scraped_to_users():
 
 @app.route("/getCnt",methods = ["GET"])
 def getCnt():
-    print(str(Post.query.count()))
     return str(Post.query.count())
+
+@app.route("/getSavedCnt",methods = ["GET"])
+@jwt_required()
+def getSavedCnt():
+
+    user_id = get_jwt_identity()
+
+    
+    return str(SavedPost.query.filter_by(user_id=user_id).count())
+
+
+
 
 @app.route("/save", methods = ["POST"])
 @jwt_required()
 def save():
-    id = request.json["email"]
+    id = request.json["postId"]
     user_id = get_jwt_identity()
 
 
+
     if(not SavedPost.query.filter_by(user_id=user_id, post_id=id).first()):
-        new_save = SavedPost(user_id = user_id, post_id = id)
+        print("SUB:", id, user_id, SavedPost.query.filter_by(user_id=user_id).count()+1)
+        new_save = SavedPost(user_id = user_id, post_id = id,postId = id, index = SavedPost.query.filter_by(user_id=user_id).count()+1)
         db.session.add(new_save)
         db.session.commit()
+
 
         return jsonify({"msg" : "Saved"}), 200
     return jsonify({"msg" : "Already Saved"}), 200
@@ -213,14 +316,44 @@ def save():
 @app.route("/unsave", methods = ["POST"])
 @jwt_required()
 def unsave():
-    id = request.json["email"]
+    id = request.json["postId"]
     user_id = get_jwt_identity()
 
 
     if(SavedPost.query.filter_by(user_id=user_id, post_id=id).first()):
         bad = SavedPost.query.filter_by(user_id=user_id, post_id=id).first()
-        db.session.remove(bad)
+        db.session.delete(bad)
         db.session.commit()
+
+        return jsonify({"msg" : "Unsaved"}), 200
+    return jsonify({"msg" : "Is not in saved"}), 200
+
+
+@app.route("/otherUnsave", methods = ["POST"])
+@jwt_required()
+def otherUnsave():
+    id = request.json["postId"]
+    user_id = get_jwt_identity()
+
+    id = int(id)+1
+
+
+
+    if(SavedPost.query.filter_by(user_id=user_id, index=id).first()):
+        bad = SavedPost.query.filter_by(user_id=user_id, index=id).first()
+        db.session.delete(bad)
+        db.session.commit()
+
+        print("SEE:", id+1, SavedPost.query.filter_by(user_id = user_id).count()+2)
+        for i in range(id+1, SavedPost.query.filter_by(user_id = user_id).count()+2):
+            post = SavedPost.query.filter_by(user_id = user_id, index = i).first()
+            post.index -= 1
+            
+
+        db.session.commit()
+    
+    
+        
 
         return jsonify({"msg" : "Unsaved"}), 200
     return jsonify({"msg" : "Is not in saved"}), 200

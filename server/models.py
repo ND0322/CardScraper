@@ -34,6 +34,8 @@ class SavedPost(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('User.id'), nullable=False)
     post_id = db.Column(db.Integer, db.ForeignKey('post.id'), nullable=False)
+    postId = db.Column(db.Integer)
+    index = db.Column(db.Integer)
     
     user = db.relationship('User', back_populates='saved_posts')
     post = db.relationship('Post', back_populates='saved_by')

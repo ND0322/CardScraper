@@ -5,6 +5,7 @@ from urllib.parse import urlencode
 from parsel import Selector
 import json
 import locale
+from random import randint
 
 
 from typing import Dict, List, Literal
@@ -24,11 +25,11 @@ def clean_price(value):
         return None  # or handle/log the error
 
 
-def convert(string, thousands_delim = ',', abbr = 'de_DE.UTF-8'):
+def convert(string, abbr = 'en_US.UTF-8'):
 
     locale.setlocale(locale.LC_ALL, abbr)
     try:
-        number = locale.atof("".join(string.split(thousands_delim)))
+        number = locale.atof(string)
     except ValueError:
         number = None
 
@@ -53,6 +54,16 @@ SORTING_MAP = {
     "newly_listed": 10,
 }
 
+session = httpx.AsyncClient(
+    headers={
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36 Edg/113.0.1774.35",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+    },
+    http2=True,
+    follow_redirects=True
+)
 
 
 def parse_search(response: httpx.Response) -> List[Dict]:
@@ -113,9 +124,8 @@ async def item_generator(session, query, max_pages=5, items_per_page=60, sort="n
             yield item
 
 async def scrape_search(
-    session,
     query,
-    max_pages=1,
+    max_pages=1000,
     category=0,
     items_per_page=60,
     sort: Literal["best_match", "ending_soonest", "newly_listed"] = "newly_listed",
@@ -137,13 +147,14 @@ async def scrape_search(
             }
         )
 
-    first_page = await session.get(make_request(page=1), timeout = 20)
+
+    first_page = await session.get(make_request(page=1))
     results = parse_search(first_page)
-    if max_pages == 1:
-        pass
-    else:
-        # find total amount of results for concurrent pagination
-        total_results = first_page.selector.css(".srp-controls__count-heading>span::text").get()
+    # find total amount of results for concurrent pagination
+    if(max_pages != 1):
+        html = first_page.text
+        selector = Selector(text=html)
+        total_results = selector.css(".srp-controls__count-heading>span::text").get()
         total_results = int(total_results.replace(",", ""))
         total_pages = math.ceil(total_results / items_per_page)
         if total_pages > max_pages:
@@ -167,3 +178,49 @@ async def scrape_search(
 
         yield balls
         
+async def randomItem(
+         query,
+    category=0,
+    items_per_page=60,
+    sort: Literal["best_match", "ending_soonest", "newly_listed"] = "newly_listed",
+):
+    
+    
+    
+    def make_request(page):
+        return "https://www.ebay.ca/sch/i.html?" + urlencode(
+            {
+                "_nkw": query,
+                "_sacat": category,
+                "_ipg": items_per_page,
+                "_sop": SORTING_MAP[sort],
+                "_pgn": page,
+                "LH_ItemCondition":3,
+                "LH_BIN":1,
+
+            }
+    )
+
+    first_page = await session.get(make_request(page=1))
+
+    html = first_page.text
+    selector = Selector(text=html)
+    total_results = selector.css(".srp-controls__count-heading>span::text").get()
+    total_results = int(total_results.replace(",", ""))
+    total_pages = math.ceil(total_results / items_per_page)
+    page = await session.get(make_request(page=randint(1, total_pages+1)))
+    
+    
+    results = parse_search(page)
+
+    for i in results:
+        balls = {}
+        balls["Total"] = str(round(convert(i["price"][3:]) + convert(i['shipping'].split(" ")[1][1:]),2))
+        balls["Price"] = convert(i["price"][3:])
+        balls["Shipping"] = convert(i['shipping'].split(" ")[1][1:])
+        balls["Title"] = i["title"]
+        balls["Photo"] = i["photo"]
+        balls["Url"] = i['url']
+
+        yield balls
+
